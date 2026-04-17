@@ -18,10 +18,11 @@ WebServer server(80);
 // ========== SERVO CONFIGURATION ==========
 #define SERVO_PIN 4           // GPIO pin for servo
 #define SERVO_OFF_ANGLE 0     // 0 degrees = laser OFF
-#define SERVO_ON_ANGLE 20     // 20 degrees = laser ON
+#define SERVO_ON_ANGLE 20     // default ON angle (can be overridden)
 
 Servo laserServo;
 int currentLaserAngle = 0;    // Track current servo position
+bool laserState = false;      // Track laser on/off state
 
 // ========== LORA CONFIGURATION ==========
 static const long LORA_FREQUENCY_HZ = 433E6;
@@ -147,20 +148,35 @@ const char* directionTextFromEnum(uint8_t dir) {
 
 // ========== SERVO CONTROL FUNCTIONS ==========
 void initServo() {
-  laserServo.attach(SERVO_PIN);
+  ESP32PWM::allocateTimer(0);
+  ESP32PWM::allocateTimer(1);
+  ESP32PWM::allocateTimer(2);
+  ESP32PWM::allocateTimer(3);
+  laserServo.attach(SERVO_PIN, 500, 2400); // standard servo range
   laserServo.write(SERVO_OFF_ANGLE);
   currentLaserAngle = SERVO_OFF_ANGLE;
+  laserState = false;
   Serial.println("Servo initialized at 0° (LASER OFF)");
+  
+  // Test servo movement (optional)
+  delay(500);
+  laserServo.write(10);
+  delay(500);
+  laserServo.write(SERVO_OFF_ANGLE);
+  Serial.println("Servo test complete");
 }
 
-void setLaser(bool on) {
+void setLaser(bool on, int angle = SERVO_ON_ANGLE) {
   if (on) {
-    laserServo.write(SERVO_ON_ANGLE);
-    currentLaserAngle = SERVO_ON_ANGLE;
-    Serial.println("LASER ON - Servo at 20°");
+    int targetAngle = constrain(angle, 0, 180);
+    laserServo.write(targetAngle);
+    currentLaserAngle = targetAngle;
+    laserState = true;
+    Serial.printf("LASER ON - Servo at %d°\n", targetAngle);
   } else {
     laserServo.write(SERVO_OFF_ANGLE);
     currentLaserAngle = SERVO_OFF_ANGLE;
+    laserState = false;
     Serial.println("LASER OFF - Servo at 0°");
   }
 }
@@ -287,13 +303,13 @@ void serviceThrottleStream() {
 }
 
 // ========== LASER COMMAND HANDLER ==========
-void handleLaserCommand(bool laserOn) {
-  setLaser(laserOn);
+void handleLaserCommand(bool laserOn, int angle = SERVO_ON_ANGLE) {
+  setLaser(laserOn, angle);
   // Send acknowledgment back via serial (for Pi to see)
   Serial.print("{\"type\":\"laser_status\",\"laser_on\":");
   Serial.print(laserOn ? "true" : "false");
   Serial.print(",\"angle\":");
-  Serial.print(laserOn ? SERVO_ON_ANGLE : SERVO_OFF_ANGLE);
+  Serial.print(laserOn ? currentLaserAngle : SERVO_OFF_ANGLE);
   Serial.println("}");
 }
 
@@ -403,6 +419,7 @@ static void piSendTelemetryJson() {
   Serial.print(",\"lastAckSeq\":"); Serial.print((unsigned int)lastAckSeq);
   Serial.print(",\"lastAckCode\":"); Serial.print((int)lastAckCode);
   Serial.print(",\"laserAngle\":"); Serial.print(currentLaserAngle);
+  Serial.print(",\"laserState\":"); Serial.print(laserState ? 1 : 0);
   Serial.println("}");
 }
 
@@ -423,26 +440,47 @@ static void handlePiUart() {
               l = constrain(l, minThrottleUs, maxThrottleUs);
               r = constrain(r, minThrottleUs, maxThrottleUs);
               setThrottleTarget((uint16_t)l, (uint16_t)r);
+              Serial.println("{\"type\":\"ack\",\"cmd\":\"set_thr\",\"status\":\"ok\"}");
             }
           } else if (strcmp(cmd, "start") == 0) {
             queueCommand(CMD_START, 0, 0, 0, 0);
+            Serial.println("{\"type\":\"ack\",\"cmd\":\"start\",\"status\":\"queued\"}");
           } else if (strcmp(cmd, "clear") == 0) {
             queueCommand(CMD_CLEAR, 0, 0, 0, 0);
+            Serial.println("{\"type\":\"ack\",\"cmd\":\"clear\",\"status\":\"queued\"}");
           } else if (strcmp(cmd, "calibrate") == 0) {
             queueCommand(CMD_CALIBRATE, 0, 0, 0, 0);
+            Serial.println("{\"type\":\"ack\",\"cmd\":\"calibrate\",\"status\":\"queued\"}");
           } else if (strcmp(cmd, "add_wp") == 0) {
             double lat = 0, lng = 0;
             if (jsonGetDouble(line, "lat", &lat) && jsonGetDouble(line, "lng", &lng)) {
               int32_t latE7 = (int32_t)llround(lat * 10000000.0);
               int32_t lonE7 = (int32_t)llround(lng * 10000000.0);
               queueCommand(CMD_ADD_WP, 0, 0, latE7, lonE7);
+              Serial.println("{\"type\":\"ack\",\"cmd\":\"add_wp\",\"status\":\"queued\"}");
             }
           } else if (strcmp(cmd, "laser_on") == 0) {
-            // Direct local servo control
-            handleLaserCommand(true);
+            long angle = SERVO_ON_ANGLE;
+            jsonGetLong(line, "angle", &angle);
+            handleLaserCommand(true, (int)angle);
           } else if (strcmp(cmd, "laser_off") == 0) {
-            // Direct local servo control
             handleLaserCommand(false);
+          } else if (strcmp(cmd, "laser_angle") == 0) {
+            long angle = 0;
+            if (jsonGetLong(line, "angle", &angle)) {
+              angle = constrain(angle, 0, 180);
+              if (laserState) {
+                // If laser is on, move to new angle
+                setLaser(true, (int)angle);
+              } else {
+                // Just update the angle for next time
+                currentLaserAngle = angle;
+                Serial.printf("Laser angle preset to %d° (laser off)\n", (int)angle);
+              }
+              Serial.print("{\"type\":\"laser_angle\",\"angle\":");
+              Serial.print(angle);
+              Serial.println(",\"status\":\"ok\"}");
+            }
           }
         }
       }
