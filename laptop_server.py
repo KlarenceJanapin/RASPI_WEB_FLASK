@@ -1,47 +1,33 @@
-#!/usr/bin/env python3
-"""
-Laptop Server for USV Control
-Includes Laser ON/OFF buttons that send commands to the Pi
-"""
-
-from flask import Flask, render_template_string, jsonify, request
-from flask_cors import CORS
 import json
+import os
 import time
-from datetime import datetime
-from collections import deque
 import threading
+import queue
+from datetime import datetime
+from flask import Flask, request, jsonify, render_template_string
+from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)  # Allow cross-origin requests
+CORS(app)
 
-# Store latest telemetry data
-latest_telemetry = {
-    "lat": 0, "lng": 0, "head": 0, "tbrng": 0, "relBearing": 0,
-    "dist": 0, "xte": 0, "wp": 0, "direction": "STRAIGHT",
-    "intensity": 0, "thrL": 1500, "thrR": 1500, "manual": 0,
-    "gpsValid": 0, "gpsSats": 0, "waterTemp": 0, "waterPH": 0,
-    "waterTDS": 0, "rssi": -100, "snr": 0, "laserAngle": 0,
-    "last_update": 0
-}
+# ============================================
+# CONFIGURATION - CHANGE THIS!
+# ============================================
+LAPTOP_IP = "172.20.10.12"  # <-- CHANGE TO YOUR LAPTOP'S IP ADDRESS
+LAPTOP_PORT = 8000
 
-# Queue for commands pending to send to Pi
-command_queue = deque(maxlen=100)
+# Store telemetry data
+telemetry_data = []
+command_queue = []
 
-# Telemetry history for graphs (last 100 points)
-telemetry_history = deque(maxlen=100)
-
-# HTML Template with Laser Controls
-HTML_TEMPLATE = """
+# HTML Template
+HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>USV Control Station - Laser Control</title>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <title>USV Control Dashboard</title>
     <style>
         * {
             margin: 0;
@@ -51,8 +37,8 @@ HTML_TEMPLATE = """
         
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-            color: #eee;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
             padding: 20px;
         }
         
@@ -62,430 +48,356 @@ HTML_TEMPLATE = """
         }
         
         h1 {
-            margin-bottom: 20px;
-            font-size: 28px;
-            display: flex;
-            align-items: center;
-            gap: 15px;
-        }
-        
-        .status-badge {
-            font-size: 14px;
-            padding: 5px 12px;
-            border-radius: 20px;
-            background: #2c2c3e;
-        }
-        
-        .status-badge.online {
-            background: #00b894;
             color: white;
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        
+        .status-bar {
+            background: white;
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 20px;
+            text-align: center;
+            font-weight: bold;
+        }
+        
+        .status-online {
+            color: #27ae60;
+        }
+        
+        .status-offline {
+            color: #e74c3c;
         }
         
         .grid {
             display: grid;
-            grid-template-columns: repeat(2, 1fr);
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
             gap: 20px;
             margin-bottom: 20px;
         }
         
-        .card {
-            background: rgba(30, 30, 50, 0.9);
-            backdrop-filter: blur(10px);
-            border-radius: 15px;
-            padding: 20px;
-            border: 1px solid rgba(255,255,255,0.1);
-        }
-        
-        .card-title {
-            font-size: 18px;
-            font-weight: bold;
-            margin-bottom: 15px;
-            color: #00b894;
-            border-left: 3px solid #00b894;
-            padding-left: 10px;
-        }
-        
-        /* Laser Control Styles */
-        .laser-control {
-            display: flex;
-            gap: 20px;
-            justify-content: center;
-            padding: 20px;
-        }
-        
-        .laser-btn {
-            padding: 20px 40px;
-            font-size: 24px;
-            font-weight: bold;
-            border: none;
-            border-radius: 50px;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 10px;
-        }
-        
-        .laser-on {
-            background: linear-gradient(135deg, #ff6b6b, #ee5a24);
-            color: white;
-            box-shadow: 0 0 20px rgba(238, 90, 36, 0.5);
-        }
-        
-        .laser-on:hover {
-            transform: scale(1.05);
-            box-shadow: 0 0 30px rgba(238, 90, 36, 0.8);
-        }
-        
-        .laser-off {
-            background: linear-gradient(135deg, #4a4a5a, #3a3a4a);
-            color: #aaa;
-        }
-        
-        .laser-off:hover {
-            transform: scale(1.05);
-            background: linear-gradient(135deg, #5a5a6a, #4a4a5a);
-        }
-        
-        .laser-status {
-            text-align: center;
-            margin-top: 15px;
-            padding: 10px;
+        .panel {
+            background: white;
             border-radius: 10px;
-            font-size: 18px;
-            font-weight: bold;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
         }
         
-        .laser-status.active {
-            background: rgba(255, 107, 107, 0.2);
-            color: #ff6b6b;
+        .panel h2 {
+            color: #333;
+            margin-bottom: 15px;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 5px;
         }
         
-        .laser-status.inactive {
-            background: rgba(100, 100, 120, 0.2);
-            color: #aaa;
-        }
-        
-        .servo-angle {
-            text-align: center;
-            margin-top: 10px;
-            font-size: 14px;
-            color: #888;
-        }
-        
-        /* Metrics Grid */
-        .metrics-grid {
+        .telemetry-grid {
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
+            grid-template-columns: repeat(2, 1fr);
             gap: 15px;
         }
         
-        .metric {
-            background: rgba(0,0,0,0.3);
+        .telemetry-item {
+            background: #f5f5f5;
             padding: 10px;
-            border-radius: 10px;
+            border-radius: 5px;
             text-align: center;
         }
         
-        .metric-label {
-            font-size: 12px;
-            color: #888;
+        .telemetry-label {
+            font-size: 0.85em;
+            color: #666;
             margin-bottom: 5px;
         }
         
-        .metric-value {
-            font-size: 20px;
+        .telemetry-value {
+            font-size: 1.3em;
             font-weight: bold;
-            color: #00b894;
+            color: #667eea;
         }
         
-        /* Map */
-        #map {
-            height: 400px;
+        .command-group {
+            margin-bottom: 20px;
+            padding: 15px;
+            background: #f9f9f9;
+            border-radius: 5px;
+        }
+        
+        .command-group h3 {
+            margin-bottom: 10px;
+            color: #555;
+        }
+        
+        button {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 1em;
+            margin: 5px;
+            transition: all 0.3s;
+        }
+        
+        button:hover {
+            background: #764ba2;
+            transform: translateY(-2px);
+        }
+        
+        button:active {
+            transform: translateY(0);
+        }
+        
+        .btn-danger {
+            background: #e74c3c;
+        }
+        
+        .btn-danger:hover {
+            background: #c0392b;
+        }
+        
+        .btn-success {
+            background: #27ae60;
+        }
+        
+        .btn-success:hover {
+            background: #229954;
+        }
+        
+        .btn-warning {
+            background: #f39c12;
+        }
+        
+        .btn-warning:hover {
+            background: #e67e22;
+        }
+        
+        .angle-control {
+            display: inline-block;
+            margin-left: 10px;
+        }
+        
+        input[type="number"] {
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            width: 80px;
+            margin: 0 5px;
+        }
+        
+        .log-panel {
+            background: white;
             border-radius: 10px;
-            margin-top: 10px;
+            padding: 20px;
+            max-height: 300px;
+            overflow-y: auto;
         }
         
-        /* Chart */
-        canvas {
-            max-height: 200px;
+        .log-entry {
+            font-family: monospace;
+            font-size: 0.85em;
+            padding: 5px;
+            border-bottom: 1px solid #eee;
+            color: #555;
         }
         
-        /* Responsive */
+        .log-time {
+            color: #667eea;
+            font-weight: bold;
+        }
+        
         @media (max-width: 768px) {
             .grid {
                 grid-template-columns: 1fr;
-            }
-            .laser-btn {
-                padding: 15px 30px;
-                font-size: 18px;
-            }
-        }
-        
-        .full-width {
-            grid-column: span 2;
-        }
-        
-        @media (max-width: 768px) {
-            .full-width {
-                grid-column: span 1;
             }
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>
-            🚤 USV Control Station
-            <span id="connectionStatus" class="status-badge">Connecting...</span>
-        </h1>
+        <h1>🚤 USV Control Dashboard</h1>
+        
+        <div class="status-bar">
+            <span id="connectionStatus">🔌 Connecting...</span>
+        </div>
         
         <div class="grid">
-            <!-- Laser Control Card -->
-            <div class="card">
-                <div class="card-title">🔴 Laser Control (Servo)</div>
-                <div class="laser-control">
-                    <button class="laser-btn laser-on" onclick="sendLaserCommand('on')">
-                        🔴 LASER ON
-                        <small>Servo → 20°</small>
-                    </button>
-                    <button class="laser-btn laser-off" onclick="sendLaserCommand('off')">
-                        ⚫ LASER OFF
-                        <small>Servo → 0°</small>
-                    </button>
-                </div>
-                <div id="laserStatus" class="laser-status inactive">
-                    🔘 Laser Status: OFF
-                </div>
-                <div id="servoAngle" class="servo-angle">
-                    Servo Angle: 0°
+            <div class="panel">
+                <h2>📡 Telemetry Data</h2>
+                <div class="telemetry-grid">
+                    <div class="telemetry-item">
+                        <div class="telemetry-label">Latitude</div>
+                        <div class="telemetry-value" id="lat">---</div>
+                    </div>
+                    <div class="telemetry-item">
+                        <div class="telemetry-label">Longitude</div>
+                        <div class="telemetry-value" id="lng">---</div>
+                    </div>
+                    <div class="telemetry-item">
+                        <div class="telemetry-label">Heading</div>
+                        <div class="telemetry-value" id="head">---°</div>
+                    </div>
+                    <div class="telemetry-item">
+                        <div class="telemetry-label">Distance</div>
+                        <div class="telemetry-value" id="dist">---m</div>
+                    </div>
+                    <div class="telemetry-item">
+                        <div class="telemetry-label">Water pH</div>
+                        <div class="telemetry-value" id="waterPH">---</div>
+                    </div>
+                    <div class="telemetry-item">
+                        <div class="telemetry-label">Water TDS</div>
+                        <div class="telemetry-value" id="waterTDS">---ppm</div>
+                    </div>
+                    <div class="telemetry-item">
+                        <div class="telemetry-label">Water Temp</div>
+                        <div class="telemetry-value" id="waterTemp">---°C</div>
+                    </div>
+                    <div class="telemetry-item">
+                        <div class="telemetry-label">RSSI</div>
+                        <div class="telemetry-value" id="rssi">---dBm</div>
+                    </div>
                 </div>
             </div>
             
-            <!-- Telemetry Card -->
-            <div class="card">
-                <div class="card-title">📡 Live Telemetry</div>
-                <div class="metrics-grid">
-                    <div class="metric">
-                        <div class="metric-label">Latitude</div>
-                        <div class="metric-value" id="lat">---</div>
+            <div class="panel">
+                <h2>🎮 Control Panel</h2>
+                
+                <div class="command-group">
+                    <h3>🔦 Laser Control</h3>
+                    <button class="btn-success" onclick="sendLaserCommand('laser_on')">🔴 Laser ON</button>
+                    <button class="btn-danger" onclick="sendLaserCommand('laser_off')">⚫ Laser OFF</button>
+                    <div class="angle-control">
+                        <label>Angle: </label>
+                        <input type="number" id="laserAngle" value="45" min="0" max="180">
+                        <button onclick="sendLaserWithAngle()">Set Angle</button>
                     </div>
-                    <div class="metric">
-                        <div class="metric-label">Longitude</div>
-                        <div class="metric-value" id="lng">---</div>
-                    </div>
-                    <div class="metric">
-                        <div class="metric-label">Heading</div>
-                        <div class="metric-value" id="head">---°</div>
-                    </div>
-                    <div class="metric">
-                        <div class="metric-label">Distance to WP</div>
-                        <div class="metric-value" id="dist">---m</div>
-                    </div>
-                    <div class="metric">
-                        <div class="metric-label">Water Temp</div>
-                        <div class="metric-value" id="waterTemp">---°C</div>
-                    </div>
-                    <div class="metric">
-                        <div class="metric-label">Water pH</div>
-                        <div class="metric-value" id="waterPH">---</div>
-                    </div>
-                    <div class="metric">
-                        <div class="metric-label">Water TDS</div>
-                        <div class="metric-value" id="waterTDS">---ppm</div>
-                    </div>
-                    <div class="metric">
-                        <div class="metric-label">LoRa RSSI</div>
-                        <div class="metric-value" id="rssi">---dBm</div>
-                    </div>
-                    <div class="metric">
-                        <div class="metric-label">GPS Sats</div>
-                        <div class="metric-value" id="gpsSats">---</div>
-                    </div>
+                </div>
+                
+                <div class="command-group">
+                    <h3>🎯 Navigation</h3>
+                    <button onclick="sendNavigationCommand('forward')">⬆️ Forward</button>
+                    <button onclick="sendNavigationCommand('backward')">⬇️ Backward</button>
+                    <button onclick="sendNavigationCommand('left')">⬅️ Left</button>
+                    <button onclick="sendNavigationCommand('right')">➡️ Right</button>
+                    <button onclick="sendNavigationCommand('stop')">🛑 Stop</button>
+                </div>
+                
+                <div class="command-group">
+                    <h3>📊 System</h3>
+                    <button onclick="sendSystemCommand('restart')">🔄 Restart System</button>
+                    <button onclick="sendSystemCommand('status')">📈 Get Status</button>
+                    <button onclick="clearLogs()">🗑️ Clear Logs</button>
                 </div>
             </div>
         </div>
         
-        <!-- Map Card -->
-        <div class="card full-width">
-            <div class="card-title">🗺️ USV Position</div>
-            <div id="map"></div>
-        </div>
-        
-        <!-- Water Quality Chart -->
-        <div class="card full-width">
-            <div class="card-title">📊 Water Quality History</div>
-            <canvas id="qualityChart"></canvas>
+        <div class="log-panel">
+            <h2>📝 Event Log</h2>
+            <div id="logEntries">
+                <div class="log-entry">System ready - waiting for data...</div>
+            </div>
         </div>
     </div>
     
     <script>
-        // Initialize map
-        var map = L.map('map').setView([14.5915, 121.0965], 15);
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            attribution: '© OpenStreetMap contributors'
-        }).addTo(map);
+        let lastUpdate = 0;
         
-        var usvMarker = L.circleMarker([0, 0], {
-            radius: 8,
-            color: '#ff6b6b',
-            fillColor: '#ff6b6b',
-            fillOpacity: 0.8,
-            weight: 2
-        }).addTo(map);
-        
-        var pathLine = L.polyline([], {color: '#00b894', weight: 3}).addTo(map);
-        var positionHistory = [];
-        
-        // Chart setup
-        var ctx = document.getElementById('qualityChart').getContext('2d');
-        var qualityChart = new Chart(ctx, {
-            type: 'line',
-            data: {
-                labels: [],
-                datasets: [
-                    {
-                        label: 'Temperature (°C)',
-                        data: [],
-                        borderColor: '#ff6b6b',
-                        backgroundColor: 'rgba(255, 107, 107, 0.1)',
-                        fill: true,
-                        yAxisID: 'y'
-                    },
-                    {
-                        label: 'pH',
-                        data: [],
-                        borderColor: '#00b894',
-                        backgroundColor: 'rgba(0, 184, 148, 0.1)',
-                        fill: true,
-                        yAxisID: 'y'
-                    },
-                    {
-                        label: 'TDS (ppm)',
-                        data: [],
-                        borderColor: '#fdcb6e',
-                        backgroundColor: 'rgba(253, 203, 110, 0.1)',
-                        fill: true,
-                        yAxisID: 'y1'
-                    }
-                ]
-            },
-            options: {
-                responsive: true,
-                interaction: { mode: 'index', intersect: false },
-                plugins: { legend: { position: 'top' } },
-                scales: {
-                    y: { title: { display: true, text: 'Temp (°C) / pH' } },
-                    y1: { position: 'right', title: { display: true, text: 'TDS (ppm)' } }
-                }
-            }
-        });
-        
-        // Send laser command to server
-        async function sendLaserCommand(state) {
-            const command = state === 'on' ? 'laser_on' : 'laser_off';
+        function addLog(message, type = 'info') {
+            const logDiv = document.getElementById('logEntries');
+            const timestamp = new Date().toLocaleTimeString();
+            const logEntry = document.createElement('div');
+            logEntry.className = 'log-entry';
+            logEntry.innerHTML = `<span class="log-time">[${timestamp}]</span> ${message}`;
+            logDiv.insertBefore(logEntry, logDiv.firstChild);
             
+            // Keep only last 50 logs
+            while (logDiv.children.length > 50) {
+                logDiv.removeChild(logDiv.lastChild);
+            }
+        }
+        
+        function updateTelemetry(data) {
+            document.getElementById('lat').innerHTML = data.lat ? data.lat.toFixed(6) : '---';
+            document.getElementById('lng').innerHTML = data.lng ? data.lng.toFixed(6) : '---';
+            document.getElementById('head').innerHTML = data.head ? data.head.toFixed(1) + '°' : '---';
+            document.getElementById('dist').innerHTML = data.dist ? data.dist.toFixed(1) + 'm' : '---';
+            document.getElementById('waterPH').innerHTML = data.waterPH ? data.waterPH.toFixed(2) : '---';
+            document.getElementById('waterTDS').innerHTML = data.waterTDS ? data.waterTDS.toFixed(0) + 'ppm' : '---';
+            document.getElementById('waterTemp').innerHTML = data.waterTemp ? data.waterTemp.toFixed(1) + '°C' : '---';
+            document.getElementById('rssi').innerHTML = data.rssi ? data.rssi + 'dBm' : '---';
+        }
+        
+        async function fetchLatestTelemetry() {
             try {
-                const response = await fetch('/api/laser', {
+                const response = await fetch('/api/telemetry/latest');
+                if (response.ok) {
+                    const data = await response.json();
+                    updateTelemetry(data);
+                    document.getElementById('connectionStatus').innerHTML = '✅ Connected to Pi';
+                    document.getElementById('connectionStatus').className = 'status-online';
+                }
+            } catch (error) {
+                document.getElementById('connectionStatus').innerHTML = '❌ Disconnected from Pi';
+                document.getElementById('connectionStatus').className = 'status-offline';
+            }
+        }
+        
+        async function sendCommand(command) {
+            try {
+                const response = await fetch('/api/commands/send', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ command: command })
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(command)
                 });
                 
                 if (response.ok) {
-                    const data = await response.json();
-                    console.log('Laser command sent:', data);
-                    
-                    // Update UI immediately
-                    if (state === 'on') {
-                        document.getElementById('laserStatus').innerHTML = '🔴 Laser Status: ON';
-                        document.getElementById('laserStatus').className = 'laser-status active';
-                        document.getElementById('servoAngle').innerHTML = 'Servo Angle: 20°';
-                    } else {
-                        document.getElementById('laserStatus').innerHTML = '⚫ Laser Status: OFF';
-                        document.getElementById('laserStatus').className = 'laser-status inactive';
-                        document.getElementById('servoAngle').innerHTML = 'Servo Angle: 0°';
-                    }
+                    const result = await response.json();
+                    addLog(`✅ Command sent: ${command.cmd}`, 'success');
+                } else {
+                    addLog(`❌ Failed to send command: ${command.cmd}`, 'error');
                 }
             } catch (error) {
-                console.error('Failed to send laser command:', error);
+                addLog(`❌ Error sending command: ${error}`, 'error');
             }
         }
         
-        // Fetch telemetry data
-        async function fetchTelemetry() {
-            try {
-                const response = await fetch('/api/telemetry/latest');
-                const data = await response.json();
-                
-                // Update metrics
-                document.getElementById('lat').innerHTML = data.lat?.toFixed(6) || '---';
-                document.getElementById('lng').innerHTML = data.lng?.toFixed(6) || '---';
-                document.getElementById('head').innerHTML = (data.head?.toFixed(1) || '---') + '°';
-                document.getElementById('dist').innerHTML = (data.dist?.toFixed(1) || '---') + 'm';
-                document.getElementById('waterTemp').innerHTML = (data.waterTemp?.toFixed(2) || '---') + '°C';
-                document.getElementById('waterPH').innerHTML = data.waterPH?.toFixed(2) || '---';
-                document.getElementById('waterTDS').innerHTML = (data.waterTDS?.toFixed(0) || '---') + 'ppm';
-                document.getElementById('rssi').innerHTML = (data.rssi || '---') + 'dBm';
-                document.getElementById('gpsSats').innerHTML = data.gpsSats || '---';
-                
-                // Update laser status from telemetry
-                if (data.laserAngle !== undefined) {
-                    if (data.laserAngle >= 20) {
-                        document.getElementById('laserStatus').innerHTML = '🔴 Laser Status: ON';
-                        document.getElementById('laserStatus').className = 'laser-status active';
-                    } else {
-                        document.getElementById('laserStatus').innerHTML = '⚫ Laser Status: OFF';
-                        document.getElementById('laserStatus').className = 'laser-status inactive';
-                    }
-                    document.getElementById('servoAngle').innerHTML = `Servo Angle: ${data.laserAngle}°`;
-                }
-                
-                // Update map
-                if (data.lat && data.lng && data.lat !== 0 && data.lng !== 0) {
-                    usvMarker.setLatLng([data.lat, data.lng]);
-                    map.setView([data.lat, data.lng], map.getZoom());
-                    
-                    // Add to path history
-                    positionHistory.push([data.lat, data.lng]);
-                    if (positionHistory.length > 100) positionHistory.shift();
-                    pathLine.setLatLngs(positionHistory);
-                }
-                
-                // Update chart
-                if (data.waterTemp && data.waterPH && data.waterTDS) {
-                    const timestamp = new Date().toLocaleTimeString();
-                    qualityChart.data.labels.push(timestamp);
-                    qualityChart.data.datasets[0].data.push(data.waterTemp);
-                    qualityChart.data.datasets[1].data.push(data.waterPH);
-                    qualityChart.data.datasets[2].data.push(data.waterTDS);
-                    
-                    if (qualityChart.data.labels.length > 50) {
-                        qualityChart.data.labels.shift();
-                        qualityChart.data.datasets.forEach(ds => ds.data.shift());
-                    }
-                    qualityChart.update();
-                }
-                
-                // Update connection status
-                document.getElementById('connectionStatus').innerHTML = '🟢 Online';
-                document.getElementById('connectionStatus').className = 'status-badge online';
-                
-            } catch (error) {
-                console.error('Failed to fetch telemetry:', error);
-                document.getElementById('connectionStatus').innerHTML = '🔴 Offline';
-                document.getElementById('connectionStatus').className = 'status-badge';
-            }
+        function sendLaserCommand(cmd) {
+            sendCommand({cmd: cmd, angle: parseInt(document.getElementById('laserAngle').value)});
         }
         
-        // Poll telemetry every 500ms
-        setInterval(fetchTelemetry, 500);
-        fetchTelemetry();
+        function sendLaserWithAngle() {
+            sendCommand({cmd: 'laser_on', angle: parseInt(document.getElementById('laserAngle').value)});
+        }
+        
+        function sendNavigationCommand(cmd) {
+            sendCommand({cmd: cmd});
+        }
+        
+        function sendSystemCommand(cmd) {
+            sendCommand({cmd: cmd});
+        }
+        
+        function clearLogs() {
+            document.getElementById('logEntries').innerHTML = '<div class="log-entry">Logs cleared</div>';
+            addLog('Logs cleared by user');
+        }
+        
+        // Update telemetry every second
+        setInterval(fetchLatestTelemetry, 1000);
+        
+        // Initial fetch
+        fetchLatestTelemetry();
+        addLog('Web interface loaded and ready');
     </script>
 </body>
 </html>
-"""
+'''
 
 # ============================================
 # API Routes
@@ -493,89 +405,100 @@ HTML_TEMPLATE = """
 
 @app.route('/')
 def index():
-    """Serve the main dashboard"""
+    """Root endpoint - serve web interface"""
     return render_template_string(HTML_TEMPLATE)
 
 @app.route('/api/telemetry', methods=['POST'])
 def receive_telemetry():
     """Receive telemetry from Raspberry Pi"""
-    global latest_telemetry, telemetry_history
-    
-    data = request.json
-    if data:
-        data['last_update'] = time.time()
-        latest_telemetry.update(data)
-        telemetry_history.append(data)
+    try:
+        data = request.json
+        data['received_at'] = time.time()
+        telemetry_data.append(data)
         
-        # Print laser status changes
-        if 'laserAngle' in data:
-            print(f"[TELEMETRY] Laser angle: {data['laserAngle']}°")
+        # Keep only last 1000 entries
+        if len(telemetry_data) > 1000:
+            telemetry_data.pop(0)
+        
+        # Print received data
+        if data.get('type') == 'laser_status':
+            print(f"✓ Laser status: {'ON' if data.get('laser_on') else 'OFF'} (angle: {data.get('angle')}°)")
+        elif data.get('type') == 'telem':
+            print(f"✓ Telemetry: {data.get('lat', '?')}, {data.get('lng', '?')}, Head: {data.get('head', '?')}°, Dist: {data.get('dist', '?')}m")
+        elif data.get('type') == 'heartbeat':
+            print(f"✓ Heartbeat received from Pi")
+        else:
+            print(f"✓ Received: {data.get('type', 'unknown')}")
         
         return jsonify({"status": "ok"}), 200
-    return jsonify({"status": "error"}), 400
-
-@app.route('/api/telemetry/latest', methods=['GET'])
-def get_latest_telemetry():
-    """Get the latest telemetry data"""
-    return jsonify(latest_telemetry)
-
-@app.route('/api/telemetry/history', methods=['GET'])
-def get_telemetry_history():
-    """Get telemetry history"""
-    return jsonify(list(telemetry_history))
-
-@app.route('/api/laser', methods=['POST'])
-def laser_control():
-    """Send laser command to Raspberry Pi"""
-    data = request.json
-    command = data.get('command')
-    
-    if command not in ['laser_on', 'laser_off']:
-        return jsonify({"error": "Invalid command"}), 400
-    
-    # Add to command queue for Pi to pick up
-    command_queue.append({
-        "cmd": command,
-        "timestamp": time.time()
-    })
-    
-    print(f"[LASER] Command queued: {command}")
-    
-    return jsonify({
-        "status": "queued",
-        "command": command
-    }), 200
+    except Exception as e:
+        print(f"Error receiving telemetry: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/commands/pending', methods=['GET'])
 def get_pending_commands():
-    """Return pending commands for Raspberry Pi to fetch"""
-    commands = list(command_queue)
-    command_queue.clear()  # Clear after sending
-    return jsonify({"commands": commands})
+    """Get pending commands for Raspberry Pi"""
+    global command_queue
+    commands_to_send = command_queue.copy()
+    command_queue = []  # Clear after sending
+    return jsonify({"commands": commands_to_send}), 200
 
-@app.route('/api/status', methods=['GET'])
-def get_status():
-    """Get system status"""
-    return jsonify({
-        "status": "running",
-        "last_telemetry_age": time.time() - latest_telemetry.get('last_update', time.time()),
-        "pending_commands": len(command_queue)
-    })
+@app.route('/api/commands/send', methods=['POST'])
+def send_command():
+    """Send command to Raspberry Pi"""
+    try:
+        command = request.json
+        command['timestamp'] = time.time()
+        command_queue.append(command)
+        print(f"📨 Command queued: {command}")
+        return jsonify({"status": "queued", "command": command}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/telemetry/latest', methods=['GET'])
+def get_latest_telemetry():
+    """Get latest telemetry data"""
+    if telemetry_data:
+        return jsonify(telemetry_data[-1]), 200
+    return jsonify({"error": "No data"}), 404
+
+@app.route('/api/telemetry/all', methods=['GET'])
+def get_all_telemetry():
+    """Get all telemetry data"""
+    return jsonify(telemetry_data), 200
+
+@app.route('/api/commands/status', methods=['GET'])
+def get_command_status():
+    """Get queue status"""
+    return jsonify({"queued_commands": len(command_queue)}), 200
 
 # ============================================
 # Main
 # ============================================
-if __name__ == '__main__':
-    print("=" * 60)
-    print("🚤 USV Laptop Server (with Laser Control)")
-    print("=" * 60)
-    print(f"📡 Server running on: http://0.0.0.0:8000")
-    print(f"🔴 Laser ON  → Servo 20°")
-    print(f"⚫ Laser OFF → Servo 0°")
-    print("=" * 60)
-    print("Make sure to:")
-    print("  1. Update LAPTOP_IP in pi_telemetry_sender.py")
-    print("  2. Connect Pi to this laptop via WiFi/Ethernet")
-    print("=" * 60)
+
+def main():
+    print("=" * 50)
+    print("Laptop Telemetry Server (with Laser Support)")
+    print("=" * 50)
+    print(f"Server IP: {LAPTOP_IP}")
+    print(f"Server Port: {LAPTOP_PORT}")
+    print(f"URL: http://{LAPTOP_IP}:{LAPTOP_PORT}")
+    print("=" * 50)
+    print("\nAvailable endpoints:")
+    print("  GET  /                        - Web interface")
+    print("  POST /api/telemetry           - Receive telemetry")
+    print("  GET  /api/commands/pending    - Get pending commands")
+    print("  POST /api/commands/send       - Send command to USV")
+    print("  GET  /api/telemetry/latest    - Get latest telemetry")
+    print("  GET  /api/telemetry/all       - Get all telemetry")
+    print("  GET  /api/commands/status     - Check command queue")
+    print("=" * 50)
+    print("\n✓ Server starting...")
+    print("✓ Open browser and go to: http://" + LAPTOP_IP + ":" + str(LAPTOP_PORT))
+    print("✓ Press Ctrl+C to stop\n")
     
-    app.run(host='0.0.0.0', port=8000, debug=True, threaded=True)
+    # Run Flask server
+    app.run(host='0.0.0.0', port=LAPTOP_PORT, debug=False, threaded=True)
+
+if __name__ == "__main__":
+    main()
