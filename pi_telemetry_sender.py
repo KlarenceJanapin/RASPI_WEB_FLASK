@@ -9,7 +9,7 @@ from datetime import datetime
 # ============================================
 # CONFIGURATION - CHANGE THIS!
 # ============================================
-LAPTOP_IP = "172.20.10.12"  # <-- CHANGE TO YOUR LAPTOP'S IP ADDRESS
+LAPTOP_IP = "192.168.1.100"  # <-- CHANGE TO YOUR LAPTOP'S IP ADDRESS
 LAPTOP_PORT = 8000
 LAPTOP_URL = f"http://{LAPTOP_IP}:{LAPTOP_PORT}"
 
@@ -73,6 +73,7 @@ def serial_worker():
     """Read from serial and send to laptop"""
     if not SERIAL_AVAILABLE:
         print("Serial module not available - running in demo mode")
+        # Demo mode: generate fake data for testing
         demo_mode()
         return
     
@@ -93,7 +94,6 @@ def serial_worker():
     
     rx_buf = bytearray()
     last_command_fetch = 0
-    last_heartbeat = 0
     
     while True:
         try:
@@ -116,39 +116,22 @@ def serial_worker():
                             # Add timestamp and send to laptop
                             telemetry_data['pi_timestamp'] = time.time()
                             if send_telemetry_to_laptop(telemetry_data):
-                                # Only print occasionally to avoid spam
-                                if telemetry_data.get('type') == 'laser_status':
-                                    print(f"✓ Laser status: {'ON' if telemetry_data.get('laser_on') else 'OFF'} (angle: {telemetry_data.get('angle')}°)")
-                                elif telemetry_data.get('type') == 'telem':
-                                    print(f"✓ Telemetry: lat={telemetry_data.get('lat', '?')}, lng={telemetry_data.get('lng', '?')}, laser={telemetry_data.get('laserAngle', '?')}°")
-                                elif telemetry_data.get('type') == 'ack':
-                                    print(f"✓ ACK from ESP32: {telemetry_data}")
-                    except json.JSONDecodeError as e:
-                        print(f"JSON decode error: {e}, line: {line[:100]}")
+                                print(f"✓ Sent telemetry: {telemetry_data.get('lat', '?')}, {telemetry_data.get('lng', '?')}")
+                    except json.JSONDecodeError:
+                        pass
             
             # Fetch commands from laptop every 100ms
             if time.time() - last_command_fetch > 0.1:
                 fetch_commands_from_laptop()
                 last_command_fetch = time.time()
             
-            # Send heartbeat every 5 seconds
-            if time.time() - last_heartbeat > 5:
-                heartbeat = {"type": "heartbeat", "timestamp": time.time()}
-                ser.write((json.dumps(heartbeat) + "\n").encode('utf-8'))
-                last_heartbeat = time.time()
-            
             # Process and send commands to serial
             try:
                 cmd = cmd_queue.get_nowait()
                 # Convert command to JSON line and send to serial
                 cmd_line = json.dumps(cmd) + "\n"
-                bytes_written = ser.write(cmd_line.encode('utf-8'))
-                ser.flush()
-                print(f"✓ Sent command to USV: {cmd} ({bytes_written} bytes)")
-                # If it's a laser command, also send acknowledgment back to laptop
-                if cmd.get('cmd') in ['laser_on', 'laser_off', 'laser_angle']:
-                    status = cmd.get('cmd')
-                    print(f"  → Laser command sent: {status}")
+                ser.write(cmd_line.encode('utf-8'))
+                print(f"✓ Sent command to USV: {cmd}")
             except queue.Empty:
                 pass
             except Exception as e:
@@ -169,7 +152,6 @@ def demo_mode():
     while True:
         # Generate fake telemetry data
         fake_data = {
-            "type": "telem",
             "lat": 37.7749 + random.uniform(-0.01, 0.01),
             "lng": -122.4194 + random.uniform(-0.01, 0.01),
             "head": random.uniform(0, 360),
@@ -179,24 +161,15 @@ def demo_mode():
             "waterTemp": random.uniform(15, 25),
             "rssi": random.randint(-90, -40),
             "snr": random.uniform(5, 30),
-            "laserAngle": random.choice([0, 20, 45, 90]),
-            "laserState": random.choice([0, 1]),
             "demo_mode": True
         }
         
         # Send to laptop
         send_telemetry_to_laptop(fake_data)
-        print(f"✓ Sent demo telemetry (laser: {fake_data['laserState']})")
+        print(f"✓ Sent demo telemetry")
         
         # Fetch commands
         fetch_commands_from_laptop()
-        
-        # Process any queued commands (simulate)
-        try:
-            cmd = cmd_queue.get_nowait()
-            print(f"Demo mode - would send: {cmd}")
-        except queue.Empty:
-            pass
         
         time.sleep(1)
 
@@ -205,7 +178,7 @@ def demo_mode():
 # ============================================
 def main():
     print("=" * 50)
-    print("Raspberry Pi Telemetry Sender (with Laser Support)")
+    print("Raspberry Pi Telemetry Sender")
     print("=" * 50)
     print(f"Laptop server: {LAPTOP_URL}")
     print(f"Serial port: {SERIAL_PORT}")
@@ -215,7 +188,7 @@ def main():
     # Test connection to laptop
     print("Testing connection to laptop...")
     try:
-        response = requests.get(f"{LAPTOP_URL}/", timeout=2)
+        response = requests.get(f"{LAPTOP_URL}/")
         if response.status_code == 200:
             print("✓ Connected to laptop server!")
         else:
