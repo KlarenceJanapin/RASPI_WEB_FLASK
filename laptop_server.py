@@ -1,555 +1,205 @@
 import json
 import os
 import time
-import threading
-import queue
-from datetime import datetime
-from flask import Flask, request, jsonify, render_template_string
-from flask_cors import CORS
+from threading import Lock
+from flask import Flask, jsonify, request, Response
 
 app = Flask(__name__)
-CORS(app)
 
-# ============================================
-# CONFIGURATION - CHANGE THIS!
-# ============================================
-LAPTOP_IP = "172.20.10.12"  # <-- CHANGE TO YOUR LAPTOP'S IP ADDRESS
-LAPTOP_PORT = 8000
+# Store latest telemetry from Raspberry Pi
+latest_lock = Lock()
+latest_telem = {"ok": False, "ts": 0, "raw": None, "data": {}}
 
-# Store telemetry data
-telemetry_data = []
-command_queue = []
+def _now_ms() -> int:
+    return int(time.time() * 1000)
 
-# HTML Template
-HTML_TEMPLATE = '''
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>USV Control Dashboard</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
-        }
-        
-        .container {
-            max-width: 1400px;
-            margin: 0 auto;
-        }
-        
-        h1 {
-            color: white;
-            text-align: center;
-            margin-bottom: 30px;
-            font-size: 2.5em;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-        }
-        
-        .status-bar {
-            background: white;
-            border-radius: 10px;
-            padding: 15px;
-            margin-bottom: 20px;
-            text-align: center;
-            font-weight: bold;
-        }
-        
-        .status-online {
-            color: #27ae60;
-        }
-        
-        .status-offline {
-            color: #e74c3c;
-        }
-        
-        .grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-            gap: 20px;
-            margin-bottom: 20px;
-        }
-        
-        .panel {
-            background: white;
-            border-radius: 10px;
-            padding: 20px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-        }
-        
-        .panel h2 {
-            color: #333;
-            margin-bottom: 15px;
-            border-bottom: 2px solid #667eea;
-            padding-bottom: 5px;
-        }
-        
-        .telemetry-grid {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 15px;
-        }
-        
-        .telemetry-item {
-            background: #f5f5f5;
-            padding: 10px;
-            border-radius: 5px;
-            text-align: center;
-        }
-        
-        .telemetry-label {
-            font-size: 0.85em;
-            color: #666;
-            margin-bottom: 5px;
-        }
-        
-        .telemetry-value {
-            font-size: 1.3em;
-            font-weight: bold;
-            color: #667eea;
-        }
-        
-        .command-group {
-            margin-bottom: 20px;
-            padding: 15px;
-            background: #f9f9f9;
-            border-radius: 5px;
-        }
-        
-        .command-group h3 {
-            margin-bottom: 10px;
-            color: #555;
-        }
-        
-        button {
-            background: #667eea;
-            color: white;
-            border: none;
-            padding: 10px 20px;
-            border-radius: 5px;
-            cursor: pointer;
-            font-size: 1em;
-            margin: 5px;
-            transition: all 0.3s;
-        }
-        
-        button:hover {
-            background: #764ba2;
-            transform: translateY(-2px);
-        }
-        
-        button:active {
-            transform: translateY(0);
-        }
-        
-        .btn-danger {
-            background: #e74c3c;
-        }
-        
-        .btn-danger:hover {
-            background: #c0392b;
-        }
-        
-        .btn-success {
-            background: #27ae60;
-        }
-        
-        .btn-success:hover {
-            background: #229954;
-        }
-        
-        .btn-warning {
-            background: #f39c12;
-        }
-        
-        .btn-warning:hover {
-            background: #e67e22;
-        }
-        
-        .angle-control {
-            display: inline-block;
-            margin-left: 10px;
-        }
-        
-        input[type="number"] {
-            padding: 8px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-            width: 80px;
-            margin: 0 5px;
-        }
-        
-        .log-panel {
-            background: white;
-            border-radius: 10px;
-            padding: 20px;
-            max-height: 300px;
-            overflow-y: auto;
-        }
-        
-        .log-entry {
-            font-family: monospace;
-            font-size: 0.85em;
-            padding: 5px;
-            border-bottom: 1px solid #eee;
-            color: #555;
-        }
-        
-        .log-time {
-            color: #667eea;
-            font-weight: bold;
-        }
-        
-        .laser-status {
-            display: inline-block;
-            padding: 5px 10px;
-            border-radius: 20px;
-            font-size: 0.9em;
-            margin-left: 10px;
-        }
-        
-        .laser-on {
-            background: #ff4444;
-            color: white;
-        }
-        
-        .laser-off {
-            background: #666;
-            color: white;
-        }
-        
-        @media (max-width: 768px) {
-            .grid {
-                grid-template-columns: 1fr;
-            }
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🚤 USV Control Dashboard</h1>
-        
-        <div class="status-bar">
-            <span id="connectionStatus">🔌 Connecting...</span>
-            <span id="laserStatusDisplay" class="laser-status laser-off">LASER OFF</span>
-        </div>
-        
-        <div class="grid">
-            <div class="panel">
-                <h2>📡 Telemetry Data</h2>
-                <div class="telemetry-grid">
-                    <div class="telemetry-item">
-                        <div class="telemetry-label">Latitude</div>
-                        <div class="telemetry-value" id="lat">---</div>
-                    </div>
-                    <div class="telemetry-item">
-                        <div class="telemetry-label">Longitude</div>
-                        <div class="telemetry-value" id="lng">---</div>
-                    </div>
-                    <div class="telemetry-item">
-                        <div class="telemetry-label">Heading</div>
-                        <div class="telemetry-value" id="head">---°</div>
-                    </div>
-                    <div class="telemetry-item">
-                        <div class="telemetry-label">Distance</div>
-                        <div class="telemetry-value" id="dist">---m</div>
-                    </div>
-                    <div class="telemetry-item">
-                        <div class="telemetry-label">Water pH</div>
-                        <div class="telemetry-value" id="waterPH">---</div>
-                    </div>
-                    <div class="telemetry-item">
-                        <div class="telemetry-label">Water TDS</div>
-                        <div class="telemetry-value" id="waterTDS">---ppm</div>
-                    </div>
-                    <div class="telemetry-item">
-                        <div class="telemetry-label">Water Temp</div>
-                        <div class="telemetry-value" id="waterTemp">---°C</div>
-                    </div>
-                    <div class="telemetry-item">
-                        <div class="telemetry-label">RSSI</div>
-                        <div class="telemetry-value" id="rssi">---dBm</div>
-                    </div>
-                    <div class="telemetry-item">
-                        <div class="telemetry-label">Laser Angle</div>
-                        <div class="telemetry-value" id="laserAngle">---°</div>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="panel">
-                <h2>🎮 Control Panel</h2>
-                
-                <div class="command-group">
-                    <h3>🔦 Laser Control</h3>
-                    <button class="btn-success" onclick="sendLaserCommand('laser_on')">🔴 Laser ON</button>
-                    <button class="btn-danger" onclick="sendLaserCommand('laser_off')">⚫ Laser OFF</button>
-                    <div class="angle-control">
-                        <label>Angle: </label>
-                        <input type="number" id="laserAngleInput" value="20" min="0" max="180">
-                        <button onclick="sendLaserAngle()">Set Angle</button>
-                        <button onclick="sendLaserOnWithAngle()">ON at Angle</button>
-                    </div>
-                </div>
-                
-                <div class="command-group">
-                    <h3>🎯 Navigation</h3>
-                    <button onclick="sendNavigationCommand('forward')">⬆️ Forward</button>
-                    <button onclick="sendNavigationCommand('backward')">⬇️ Backward</button>
-                    <button onclick="sendNavigationCommand('left')">⬅️ Left</button>
-                    <button onclick="sendNavigationCommand('right')">➡️ Right</button>
-                    <button onclick="sendNavigationCommand('stop')">🛑 Stop</button>
-                </div>
-                
-                <div class="command-group">
-                    <h3>📊 System</h3>
-                    <button onclick="sendSystemCommand('restart')">🔄 Restart System</button>
-                    <button onclick="sendSystemCommand('status')">📈 Get Status</button>
-                    <button onclick="clearLogs()">🗑️ Clear Logs</button>
-                </div>
-            </div>
-        </div>
-        
-        <div class="log-panel">
-            <h2>📝 Event Log</h2>
-            <div id="logEntries">
-                <div class="log-entry">System ready - waiting for data...</div>
-            </div>
-        </div>
-    </div>
-    
-    <script>
-        let lastUpdate = 0;
-        
-        function addLog(message, type = 'info') {
-            const logDiv = document.getElementById('logEntries');
-            const timestamp = new Date().toLocaleTimeString();
-            const logEntry = document.createElement('div');
-            logEntry.className = 'log-entry';
-            logEntry.innerHTML = `<span class="log-time">[${timestamp}]</span> ${message}`;
-            logDiv.insertBefore(logEntry, logDiv.firstChild);
-            
-            // Keep only last 50 logs
-            while (logDiv.children.length > 50) {
-                logDiv.removeChild(logDiv.lastChild);
-            }
-        }
-        
-        function updateTelemetry(data) {
-            document.getElementById('lat').innerHTML = data.lat ? data.lat.toFixed(6) : '---';
-            document.getElementById('lng').innerHTML = data.lng ? data.lng.toFixed(6) : '---';
-            document.getElementById('head').innerHTML = data.head ? data.head.toFixed(1) + '°' : '---';
-            document.getElementById('dist').innerHTML = data.dist ? data.dist.toFixed(1) + 'm' : '---';
-            document.getElementById('waterPH').innerHTML = data.waterPH ? data.waterPH.toFixed(2) : '---';
-            document.getElementById('waterTDS').innerHTML = data.waterTDS ? data.waterTDS.toFixed(0) + 'ppm' : '---';
-            document.getElementById('waterTemp').innerHTML = data.waterTemp ? data.waterTemp.toFixed(1) + '°C' : '---';
-            document.getElementById('rssi').innerHTML = data.rssi ? data.rssi + 'dBm' : '---';
-            document.getElementById('laserAngle').innerHTML = data.laserAngle ? data.laserAngle + '°' : '---';
-            
-            // Update laser status display
-            const laserStatusSpan = document.getElementById('laserStatusDisplay');
-            if (data.laserState === 1) {
-                laserStatusSpan.innerHTML = '🔴 LASER ON';
-                laserStatusSpan.className = 'laser-status laser-on';
-            } else {
-                laserStatusSpan.innerHTML = '⚫ LASER OFF';
-                laserStatusSpan.className = 'laser-status laser-off';
-            }
-        }
-        
-        async function fetchLatestTelemetry() {
-            try {
-                const response = await fetch('/api/telemetry/latest');
-                if (response.ok) {
-                    const data = await response.json();
-                    updateTelemetry(data);
-                    document.getElementById('connectionStatus').innerHTML = '✅ Connected to Pi';
-                    document.getElementById('connectionStatus').className = 'status-online';
-                }
-            } catch (error) {
-                document.getElementById('connectionStatus').innerHTML = '❌ Disconnected from Pi';
-                document.getElementById('connectionStatus').className = 'status-offline';
-            }
-        }
-        
-        async function sendCommand(command) {
-            try {
-                const response = await fetch('/api/commands/send', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify(command)
-                });
-                
-                if (response.ok) {
-                    const result = await response.json();
-                    addLog(`✅ Command sent: ${command.cmd}`, 'success');
-                    return true;
-                } else {
-                    addLog(`❌ Failed to send command: ${command.cmd}`, 'error');
-                    return false;
-                }
-            } catch (error) {
-                addLog(`❌ Error sending command: ${error}`, 'error');
-                return false;
-            }
-        }
-        
-        function sendLaserCommand(cmd) {
-            if (cmd === 'laser_on') {
-                const angle = parseInt(document.getElementById('laserAngleInput').value);
-                sendCommand({cmd: cmd, angle: angle});
-            } else {
-                sendCommand({cmd: cmd});
-            }
-        }
-        
-        function sendLaserOnWithAngle() {
-            const angle = parseInt(document.getElementById('laserAngleInput').value);
-            sendCommand({cmd: 'laser_on', angle: angle});
-        }
-        
-        function sendLaserAngle() {
-            const angle = parseInt(document.getElementById('laserAngleInput').value);
-            sendCommand({cmd: 'laser_angle', angle: angle});
-        }
-        
-        function sendNavigationCommand(cmd) {
-            sendCommand({cmd: cmd});
-        }
-        
-        function sendSystemCommand(cmd) {
-            sendCommand({cmd: cmd});
-        }
-        
-        function clearLogs() {
-            document.getElementById('logEntries').innerHTML = '<div class="log-entry">Logs cleared</div>';
-            addLog('Logs cleared by user');
-        }
-        
-        // Update telemetry every second
-        setInterval(fetchLatestTelemetry, 1000);
-        
-        // Initial fetch
-        fetchLatestTelemetry();
-        addLog('Web interface loaded and ready');
-    </script>
-</body>
-</html>
-'''
-
-# ============================================
-# API Routes
-# ============================================
-
-@app.route('/')
-def index():
-    """Root endpoint - serve web interface"""
-    return render_template_string(HTML_TEMPLATE)
+def _get_latest() -> dict:
+    with latest_lock:
+        return dict(latest_telem)
 
 @app.route('/api/telemetry', methods=['POST'])
 def receive_telemetry():
-    """Receive telemetry from Raspberry Pi"""
+    """Endpoint for Raspberry Pi to send telemetry data"""
     try:
-        data = request.json
-        data['received_at'] = time.time()
-        telemetry_data.append(data)
+        data = request.get_json()
+        if not data:
+            return jsonify({"ok": False, "err": "no_data"}), 400
         
-        # Keep only last 1000 entries
-        if len(telemetry_data) > 1000:
-            telemetry_data.pop(0)
+        with latest_lock:
+            latest_telem["ok"] = True
+            latest_telem["ts"] = _now_ms()
+            latest_telem["raw"] = json.dumps(data)
+            latest_telem["data"] = data
         
-        # Print received data
-        if data.get('type') == 'laser_status':
-            print(f"✓ Laser status: {'ON' if data.get('laser_on') else 'OFF'} (angle: {data.get('angle')}°)")
-        elif data.get('type') == 'telem':
-            print(f"✓ Telemetry: {data.get('lat', '?')}, {data.get('lng', '?')}, Head: {data.get('head', '?')}°, Laser: {data.get('laserAngle', '?')}°")
-        elif data.get('type') == 'heartbeat':
-            print(f"✓ Heartbeat received from Pi")
-        elif data.get('type') == 'ack':
-            print(f"✓ ACK: {data}")
-        else:
-            print(f"✓ Received: {data.get('type', 'unknown')}")
-        
-        return jsonify({"status": "ok"}), 200
+        return jsonify({"ok": True})
     except Exception as e:
-        print(f"Error receiving telemetry: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"ok": False, "err": str(e)}), 500
+
+@app.route('/api/command', methods=['POST'])
+def send_command():
+    """Endpoint for web UI to send commands to Raspberry Pi"""
+    payload = request.get_json(silent=True) or {}
+    
+    # Store in a queue for Pi to fetch
+    with latest_lock:
+        if 'pending_commands' not in latest_telem:
+            latest_telem['pending_commands'] = []
+        latest_telem['pending_commands'].append(payload)
+    
+    return jsonify({"ok": True})
 
 @app.route('/api/commands/pending', methods=['GET'])
 def get_pending_commands():
-    """Get pending commands for Raspberry Pi"""
-    global command_queue
-    commands_to_send = command_queue.copy()
-    command_queue = []  # Clear after sending
-    return jsonify({"commands": commands_to_send}), 200
+    """Endpoint for Raspberry Pi to fetch pending commands"""
+    with latest_lock:
+        commands = latest_telem.get('pending_commands', [])
+        latest_telem['pending_commands'] = []
+    return jsonify({"commands": commands})
 
-@app.route('/api/commands/send', methods=['POST'])
-def send_command():
-    """Send command to Raspberry Pi"""
-    try:
-        command = request.json
-        command['timestamp'] = time.time()
-        command_queue.append(command)
-        print(f"📨 Command queued: {command}")
-        return jsonify({"status": "queued", "command": command}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+@app.route('/')
+def index():
+    return Response(INDEX_HTML, mimetype='text/html')
 
-@app.route('/api/telemetry/latest', methods=['GET'])
-def get_latest_telemetry():
-    """Get latest telemetry data"""
-    if telemetry_data:
-        return jsonify(telemetry_data[-1]), 200
-    return jsonify({"error": "No data"}), 404
+@app.route('/data')
+def get_data():
+    latest = _get_latest()
+    age = 999999
+    if latest["ok"] and latest["ts"]:
+        age = _now_ms() - int(latest["ts"])
+    return jsonify({"age_ms": age, "data": latest["data"]})
 
-@app.route('/api/telemetry/all', methods=['GET'])
-def get_all_telemetry():
-    """Get all telemetry data"""
-    return jsonify(telemetry_data), 200
+INDEX_HTML = """<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>USV Dashboard - Laptop Server</title>
+  <style>
+    :root { --bg:#0b1220; --card:#121a2b; --text:#e5e7eb; --muted:#94a3b8; --accent:#60a5fa; --ok:#22c55e; --bad:#ef4444; --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: var(--sans); background: radial-gradient(900px 600px at 20% 0%, #152447, var(--bg)); color: var(--text); padding: 16px; }
+    .wrap { max-width: 980px; margin: 0 auto; display: grid; gap: 14px; }
+    .top { display:flex; justify-content: space-between; align-items:center; gap: 10px; padding: 14px 16px; background: rgba(18,26,43,.9); border: 1px solid rgba(148,163,184,.15); border-radius: 14px; }
+    .title { font-weight: 900; letter-spacing: .03em; }
+    .pill { padding: 6px 10px; border-radius: 999px; background: rgba(96,165,250,.12); border: 1px solid rgba(96,165,250,.25); color: var(--accent); font-family: var(--mono); font-weight: 800; }
+    .grid { display:grid; grid-template-columns: 1.2fr 1fr; gap: 14px; }
+    .card { background: rgba(18,26,43,.9); border: 1px solid rgba(148,163,184,.15); border-radius: 14px; padding: 14px; display:grid; gap: 12px; }
+    .card h3 { margin:0; font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+    .metrics { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .m { padding: 10px; border-radius: 12px; border: 1px solid rgba(148,163,184,.12); background: rgba(2,6,23,.25); }
+    .m .k { font-size: 11px; color: var(--muted); font-weight: 800; }
+    .m .v { font-family: var(--mono); font-size: 16px; font-weight: 900; margin-top: 4px; }
+    button { border:0; border-radius: 12px; padding: 12px 12px; font-weight: 900; cursor:pointer; }
+    .btns { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .btn-start { background: rgba(34,197,94,.18); border: 1px solid rgba(34,197,94,.35); color: #dcfce7; }
+    .btn-stop { background: rgba(239,68,68,.16); border: 1px solid rgba(239,68,68,.35); color: #fee2e2; }
+    .btn-cal { background: rgba(96,165,250,.12); border: 1px solid rgba(96,165,250,.30); color: #dbeafe; }
+    input[type=range] { width:100%; }
+    .thr { display:grid; gap: 10px; }
+    .thr .lab { display:flex; justify-content: space-between; font-family: var(--mono); font-weight: 900; }
+    @media(max-width: 880px){ .grid{ grid-template-columns: 1fr; } .metrics{ grid-template-columns: 1fr; } .btns{ grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div class="title">USV Dashboard - Laptop Server</div>
+      <div class="pill" id="link">STATUS: ---</div>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <h3>Telemetry</h3>
+        <div class="metrics">
+          <div class="m"><div class="k">Lat</div><div class="v" id="lat">---</div></div>
+          <div class="m"><div class="k">Lon</div><div class="v" id="lon">---</div></div>
+          <div class="m"><div class="k">Heading</div><div class="v" id="head">---</div></div>
+          <div class="m"><div class="k">Dist</div><div class="v" id="dist">---</div></div>
+          <div class="m"><div class="k">pH</div><div class="v" id="ph">---</div></div>
+          <div class="m"><div class="k">TDS</div><div class="v" id="tds">---</div></div>
+          <div class="m"><div class="k">Temp</div><div class="v" id="temp">---</div></div>
+          <div class="m"><div class="k">RSSI</div><div class="v" id="rssi">---</div></div>
+          <div class="m"><div class="k">SNR</div><div class="v" id="snr">---</div></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Control</h3>
+        <div class="btns">
+          <button class="btn-start" onclick="sendCmd({cmd:'start'})">Start</button>
+          <button class="btn-stop" onclick="sendCmd({cmd:'clear'})">Clear</button>
+          <button class="btn-cal" onclick="sendCmd({cmd:'calibrate'})">Calibrate</button>
+        </div>
+        <div class="thr">
+          <div class="lab"><span>Sync</span><span id="vSync">1000</span></div>
+          <input type="range" min="1000" max="2000" value="1000" id="sync" oninput="onSync(this.value)">
+          <div class="lab"><span>Left</span><span id="vL">1000</span></div>
+          <input type="range" min="1000" max="2000" value="1000" id="left" oninput="onLeft(this.value)">
+          <div class="lab"><span>Right</span><span id="vR">1000</span></div>
+          <input type="range" min="1000" max="2000" value="1000" id="right" oninput="onRight(this.value)">
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    function sendCmd(payload){
+      fetch('/api/command', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)}).catch(()=>{});
+    }
+    let lastThrTs = 0;
+    function sendThr(l, r){
+      const now = Date.now();
+      if (now - lastThrTs < 120) return;
+      lastThrTs = now;
+      sendCmd({cmd:'set_thr', left: Number(l), right: Number(r)});
+    }
+    function onSync(v){
+      document.getElementById('vSync').innerText = v;
+      document.getElementById('left').value = v;
+      document.getElementById('right').value = v;
+      document.getElementById('vL').innerText = v;
+      document.getElementById('vR').innerText = v;
+      sendThr(v, v);
+    }
+    function onLeft(v){
+      document.getElementById('vL').innerText = v;
+      sendThr(v, document.getElementById('right').value);
+    }
+    function onRight(v){
+      document.getElementById('vR').innerText = v;
+      sendThr(document.getElementById('left').value, v);
+    }
+    setInterval(() => {
+      fetch('/data').then(r => r.json()).then(d => {
+        const age = d.age_ms;
+        const ok = age < 5000;
+        const link = document.getElementById('link');
+        link.innerText = ok ? ('LINK: OK ' + age + 'ms') : ('LINK: LOST ' + age + 'ms');
+        link.style.borderColor = ok ? 'rgba(34,197,94,.35)' : 'rgba(239,68,68,.35)';
+        link.style.background = ok ? 'rgba(34,197,94,.12)' : 'rgba(239,68,68,.10)';
+        link.style.color = ok ? '#dcfce7' : '#fee2e2';
+        const t = d.data || {};
+        document.getElementById('lat').innerText = (t.lat !== undefined) ? Number(t.lat).toFixed(6) : '---';
+        document.getElementById('lon').innerText = (t.lng !== undefined) ? Number(t.lng).toFixed(6) : '---';
+        document.getElementById('head').innerText = (t.head !== undefined) ? (Number(t.head).toFixed(1) + '°') : '---';
+        document.getElementById('dist').innerText = (t.dist !== undefined) ? (Number(t.dist).toFixed(1) + 'm') : '---';
+        document.getElementById('ph').innerText = (t.waterPH !== undefined) ? Number(t.waterPH).toFixed(2) : '---';
+        document.getElementById('tds').innerText = (t.waterTDS !== undefined) ? (Math.round(Number(t.waterTDS)) + ' ppm') : '---';
+        document.getElementById('temp').innerText = (t.waterTemp !== undefined) ? (Number(t.waterTemp).toFixed(2) + ' °C') : '---';
+        document.getElementById('rssi').innerText = (t.rssi !== undefined) ? (Number(t.rssi) + ' dBm') : '---';
+        document.getElementById('snr').innerText = (t.snr !== undefined) ? (Number(t.snr).toFixed(1) + ' dB') : '---';
+      }).catch(()=>{});
+    }, 500);
+  </script>
+</body>
+</html>
+"""
 
-@app.route('/api/commands/status', methods=['GET'])
-def get_command_status():
-    """Get queue status"""
-    return jsonify({"queued_commands": len(command_queue)}), 200
-
-# ============================================
-# Main
-# ============================================
-
-def main():
-    print("=" * 50)
-    print("Laptop Telemetry Server (with Laser Support)")
-    print("=" * 50)
-    print(f"Server IP: {LAPTOP_IP}")
-    print(f"Server Port: {LAPTOP_PORT}")
-    print(f"URL: http://{LAPTOP_IP}:{LAPTOP_PORT}")
-    print("=" * 50)
-    print("\nAvailable endpoints:")
-    print("  GET  /                        - Web interface")
-    print("  POST /api/telemetry           - Receive telemetry")
-    print("  GET  /api/commands/pending    - Get pending commands")
-    print("  POST /api/commands/send       - Send command to USV")
-    print("  GET  /api/telemetry/latest    - Get latest telemetry")
-    print("  GET  /api/telemetry/all       - Get all telemetry")
-    print("  GET  /api/commands/status     - Check command queue")
-    print("=" * 50)
-    print("\n✓ Server starting...")
-    print("✓ Open browser and go to: http://" + LAPTOP_IP + ":" + str(LAPTOP_PORT))
-    print("✓ Press Ctrl+C to stop\n")
-    
-    # Run Flask server
-    app.run(host='0.0.0.0', port=LAPTOP_PORT, debug=False, threaded=True)
-
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    host = os.environ.get('USV_HOST', '0.0.0.0')
+    port = int(os.environ.get('USV_PORT', '8000'))
+    print(f"=" * 50)
+    print(f"Laptop Server Running")
+    print(f"=" * 50)
+    print(f"Access dashboard at: http://localhost:{port}")
+    print(f"Or on network: http://<YOUR_LAPTOP_IP>:{port}")
+    print(f"Raspberry Pi should send data to: http://<YOUR_LAPTOP_IP>:{port}/api/telemetry")
+    print(f"=" * 50)
+    app.run(host=host, port=port, debug=False, threaded=True)
