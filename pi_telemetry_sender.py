@@ -120,9 +120,11 @@ def serial_worker():
                                 if telemetry_data.get('type') == 'laser_status':
                                     print(f"✓ Laser status: {'ON' if telemetry_data.get('laser_on') else 'OFF'} (angle: {telemetry_data.get('angle')}°)")
                                 elif telemetry_data.get('type') == 'telem':
-                                    print(f"✓ Telemetry: {telemetry_data.get('lat', '?')}, {telemetry_data.get('lng', '?')}")
-                    except json.JSONDecodeError:
-                        pass
+                                    print(f"✓ Telemetry: lat={telemetry_data.get('lat', '?')}, lng={telemetry_data.get('lng', '?')}, laser={telemetry_data.get('laserAngle', '?')}°")
+                                elif telemetry_data.get('type') == 'ack':
+                                    print(f"✓ ACK from ESP32: {telemetry_data}")
+                    except json.JSONDecodeError as e:
+                        print(f"JSON decode error: {e}, line: {line[:100]}")
             
             # Fetch commands from laptop every 100ms
             if time.time() - last_command_fetch > 0.1:
@@ -140,11 +142,12 @@ def serial_worker():
                 cmd = cmd_queue.get_nowait()
                 # Convert command to JSON line and send to serial
                 cmd_line = json.dumps(cmd) + "\n"
-                ser.write(cmd_line.encode('utf-8'))
-                print(f"✓ Sent command to USV: {cmd}")
+                bytes_written = ser.write(cmd_line.encode('utf-8'))
+                ser.flush()
+                print(f"✓ Sent command to USV: {cmd} ({bytes_written} bytes)")
                 # If it's a laser command, also send acknowledgment back to laptop
-                if cmd.get('cmd') in ['laser_on', 'laser_off']:
-                    status = "ON" if cmd.get('cmd') == 'laser_on' else "OFF"
+                if cmd.get('cmd') in ['laser_on', 'laser_off', 'laser_angle']:
+                    status = cmd.get('cmd')
                     print(f"  → Laser command sent: {status}")
             except queue.Empty:
                 pass
@@ -176,16 +179,24 @@ def demo_mode():
             "waterTemp": random.uniform(15, 25),
             "rssi": random.randint(-90, -40),
             "snr": random.uniform(5, 30),
-            "laserAngle": 0,
+            "laserAngle": random.choice([0, 20, 45, 90]),
+            "laserState": random.choice([0, 1]),
             "demo_mode": True
         }
         
         # Send to laptop
         send_telemetry_to_laptop(fake_data)
-        print(f"✓ Sent demo telemetry")
+        print(f"✓ Sent demo telemetry (laser: {fake_data['laserState']})")
         
         # Fetch commands
         fetch_commands_from_laptop()
+        
+        # Process any queued commands (simulate)
+        try:
+            cmd = cmd_queue.get_nowait()
+            print(f"Demo mode - would send: {cmd}")
+        except queue.Empty:
+            pass
         
         time.sleep(1)
 
@@ -204,7 +215,7 @@ def main():
     # Test connection to laptop
     print("Testing connection to laptop...")
     try:
-        response = requests.get(f"{LAPTOP_URL}/")
+        response = requests.get(f"{LAPTOP_URL}/", timeout=2)
         if response.status_code == 200:
             print("✓ Connected to laptop server!")
         else:
