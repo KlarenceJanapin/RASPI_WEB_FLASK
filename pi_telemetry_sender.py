@@ -9,7 +9,7 @@ from datetime import datetime
 # ============================================
 # CONFIGURATION - CHANGE THIS!
 # ============================================
-LAPTOP_IP = "192.168.1.100"  # <-- CHANGE TO YOUR LAPTOP'S IP ADDRESS
+LAPTOP_IP = "172.20.10.12"  # <-- CHANGE TO YOUR LAPTOP'S IP ADDRESS
 LAPTOP_PORT = 8000
 LAPTOP_URL = f"http://{LAPTOP_IP}:{LAPTOP_PORT}"
 
