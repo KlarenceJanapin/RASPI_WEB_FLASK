@@ -209,6 +209,24 @@ HTML_TEMPLATE = '''
             font-weight: bold;
         }
         
+        .laser-status {
+            display: inline-block;
+            padding: 5px 10px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            margin-left: 10px;
+        }
+        
+        .laser-on {
+            background: #ff4444;
+            color: white;
+        }
+        
+        .laser-off {
+            background: #666;
+            color: white;
+        }
+        
         @media (max-width: 768px) {
             .grid {
                 grid-template-columns: 1fr;
@@ -222,6 +240,7 @@ HTML_TEMPLATE = '''
         
         <div class="status-bar">
             <span id="connectionStatus">🔌 Connecting...</span>
+            <span id="laserStatusDisplay" class="laser-status laser-off">LASER OFF</span>
         </div>
         
         <div class="grid">
@@ -260,6 +279,10 @@ HTML_TEMPLATE = '''
                         <div class="telemetry-label">RSSI</div>
                         <div class="telemetry-value" id="rssi">---dBm</div>
                     </div>
+                    <div class="telemetry-item">
+                        <div class="telemetry-label">Laser Angle</div>
+                        <div class="telemetry-value" id="laserAngle">---°</div>
+                    </div>
                 </div>
             </div>
             
@@ -272,8 +295,9 @@ HTML_TEMPLATE = '''
                     <button class="btn-danger" onclick="sendLaserCommand('laser_off')">⚫ Laser OFF</button>
                     <div class="angle-control">
                         <label>Angle: </label>
-                        <input type="number" id="laserAngle" value="45" min="0" max="180">
-                        <button onclick="sendLaserWithAngle()">Set Angle</button>
+                        <input type="number" id="laserAngleInput" value="20" min="0" max="180">
+                        <button onclick="sendLaserAngle()">Set Angle</button>
+                        <button onclick="sendLaserOnWithAngle()">ON at Angle</button>
                     </div>
                 </div>
                 
@@ -329,6 +353,17 @@ HTML_TEMPLATE = '''
             document.getElementById('waterTDS').innerHTML = data.waterTDS ? data.waterTDS.toFixed(0) + 'ppm' : '---';
             document.getElementById('waterTemp').innerHTML = data.waterTemp ? data.waterTemp.toFixed(1) + '°C' : '---';
             document.getElementById('rssi').innerHTML = data.rssi ? data.rssi + 'dBm' : '---';
+            document.getElementById('laserAngle').innerHTML = data.laserAngle ? data.laserAngle + '°' : '---';
+            
+            // Update laser status display
+            const laserStatusSpan = document.getElementById('laserStatusDisplay');
+            if (data.laserState === 1) {
+                laserStatusSpan.innerHTML = '🔴 LASER ON';
+                laserStatusSpan.className = 'laser-status laser-on';
+            } else {
+                laserStatusSpan.innerHTML = '⚫ LASER OFF';
+                laserStatusSpan.className = 'laser-status laser-off';
+            }
         }
         
         async function fetchLatestTelemetry() {
@@ -359,20 +394,34 @@ HTML_TEMPLATE = '''
                 if (response.ok) {
                     const result = await response.json();
                     addLog(`✅ Command sent: ${command.cmd}`, 'success');
+                    return true;
                 } else {
                     addLog(`❌ Failed to send command: ${command.cmd}`, 'error');
+                    return false;
                 }
             } catch (error) {
                 addLog(`❌ Error sending command: ${error}`, 'error');
+                return false;
             }
         }
         
         function sendLaserCommand(cmd) {
-            sendCommand({cmd: cmd, angle: parseInt(document.getElementById('laserAngle').value)});
+            if (cmd === 'laser_on') {
+                const angle = parseInt(document.getElementById('laserAngleInput').value);
+                sendCommand({cmd: cmd, angle: angle});
+            } else {
+                sendCommand({cmd: cmd});
+            }
         }
         
-        function sendLaserWithAngle() {
-            sendCommand({cmd: 'laser_on', angle: parseInt(document.getElementById('laserAngle').value)});
+        function sendLaserOnWithAngle() {
+            const angle = parseInt(document.getElementById('laserAngleInput').value);
+            sendCommand({cmd: 'laser_on', angle: angle});
+        }
+        
+        function sendLaserAngle() {
+            const angle = parseInt(document.getElementById('laserAngleInput').value);
+            sendCommand({cmd: 'laser_angle', angle: angle});
         }
         
         function sendNavigationCommand(cmd) {
@@ -424,9 +473,11 @@ def receive_telemetry():
         if data.get('type') == 'laser_status':
             print(f"✓ Laser status: {'ON' if data.get('laser_on') else 'OFF'} (angle: {data.get('angle')}°)")
         elif data.get('type') == 'telem':
-            print(f"✓ Telemetry: {data.get('lat', '?')}, {data.get('lng', '?')}, Head: {data.get('head', '?')}°, Dist: {data.get('dist', '?')}m")
+            print(f"✓ Telemetry: {data.get('lat', '?')}, {data.get('lng', '?')}, Head: {data.get('head', '?')}°, Laser: {data.get('laserAngle', '?')}°")
         elif data.get('type') == 'heartbeat':
             print(f"✓ Heartbeat received from Pi")
+        elif data.get('type') == 'ack':
+            print(f"✓ ACK: {data}")
         else:
             print(f"✓ Received: {data.get('type', 'unknown')}")
         
