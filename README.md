@@ -32,3 +32,22 @@ usv_project/
 ├── requirements_laptop.txt   # Laptop dependencies
 ├── requirements_pi.txt       # Raspberry Pi dependencies
 └── README.md                 # Setup instructions
+
+
+
+ Install python3-venv if not already installed
+sudo apt install python3-venv python3-full -y
+
+# Create a virtual environment
+python3 -m venv usv_env
+
+# Activate the virtual environment
+source usv_env/bin/activate
+
+# Now install the requirements
+pip install -r requirements.txt
+
+# Run your script
+python pi_telemetry_sender.py
+
+# When done, d
