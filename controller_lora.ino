@@ -126,7 +126,7 @@ enum : uint8_t {
   CMD_CLEAR = 3,
   CMD_CALIBRATE = 4,
   CMD_ADD_WP = 5,
-  CMD_LASER = 6,        // NEW: Laser control command
+  CMD_LASER = 6,        // kept for possible future use (remote laser)
 };
 
 enum : uint8_t {
@@ -438,9 +438,11 @@ static void handlePiUart() {
               queueCommand(CMD_ADD_WP, 0, 0, latE7, lonE7);
             }
           } else if (strcmp(cmd, "laser_on") == 0) {
-            queueCommand(CMD_LASER, 1, 0, 0, 0);  // thrL = 1 means ON
+            // Direct local servo control
+            handleLaserCommand(true);
           } else if (strcmp(cmd, "laser_off") == 0) {
-            queueCommand(CMD_LASER, 0, 0, 0, 0);  // thrL = 0 means OFF
+            // Direct local servo control
+            handleLaserCommand(false);
           }
         }
       }
@@ -569,7 +571,7 @@ void setup() {
   if (loraOk) LoRa.receive();
   
 #if !BRIDGE_MODE
-  // ... (existing WiFi setup code - omitted for brevity, same as original)
+  // (existing WiFi setup code would go here - omitted as BRIDGE_MODE=1)
 #else
   Serial.println("{\"type\":\"status\",\"bridge\":1,\"servo\":\"ready\"}");
 #endif
@@ -577,7 +579,7 @@ void setup() {
 
 void loop() {
 #if !BRIDGE_MODE
-  // ... (existing loop code)
+  // (existing loop code for non-bridge mode)
 #else
   handlePiUart();
 #endif
